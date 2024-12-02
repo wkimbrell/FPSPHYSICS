@@ -1,0 +1,242 @@
+#include <Wire.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+#include <Q2HX711.h> // Updated to use Q2HX711 library
+
+// OLED setup
+#define SCREEN_WIDTH 128
+#define SCREEN_HEIGHT 64
+#define SCREEN_ADDRESS 0x3C
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1);
+
+// Thumbstick and Ultrasonic Sensor
+#define JOYSTICK_X A0
+#define JOYSTICK_Y A1
+#define TRIGGER_PIN 8
+#define ECHO_PIN 9
+
+const int shootDistance = 15; // Ultrasonic shooting threshold (cm)
+
+// Load Cell Setup
+#define LOADCELL_DOUT_PIN 2
+#define LOADCELL_SCK_PIN 3
+Q2HX711 scale(LOADCELL_DOUT_PIN, LOADCELL_SCK_PIN); // Updated scale definition
+float calibrationFactor = 1900.0; // Adjust this based on your calibration
+long tareValue = 0;              // To store the tare value
+
+// Constants
+const int refreshRate = 50;   // Refresh rate for gameplay
+const int maxBulletSize = 10; // Max bullet size based on weight
+const int weightScalingFactor = 1;
+
+// Player Positions
+int xP1 = 64, yP1 = 32; // Player 1 position
+int xP2 = 96, yP2 = 32; // Target (Player 2)
+
+// Bullets
+int xShotP1[10], yShotP1[10];
+int shotsP1 = 0, totalShots = 10;
+
+// Timing
+unsigned long shotTimeP1 = 0;
+unsigned long timer = 0;
+
+// Game Over cheat code
+int cheatCodeIndex = 0;
+const int cheatCode[] = {0, 0, 1, 1, 2, 3, 2, 3}; // "Up Up Down Down, Left Right Left Right"
+
+// Functions for sensors
+long measureDistance() {
+  digitalWrite(TRIGGER_PIN, LOW);
+  delayMicroseconds(2);
+  digitalWrite(TRIGGER_PIN, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(TRIGGER_PIN, LOW);
+
+  long duration = pulseIn(ECHO_PIN, HIGH);
+  return duration * 0.034 / 2; // Convert to cm
+  long distance = duration * 0.034 / 2;
+  if (distance < 2 || distance > 400) { //invalid range
+    return -1;
+  }
+  return distance;
+}
+
+// Ensure Player 2 target is correctly repositioned
+void moveTarget() {
+  xP2 = random(SCREEN_WIDTH / 2, SCREEN_WIDTH - 10); // Keep Player 2 within X range
+  yP2 = random(20, SCREEN_HEIGHT - 10);             // Randomize Y within boundaries
+}
+
+// Handle Player 2 being hit
+void checkHitP2(int shots) {
+  for (int i = 0; i < shots; i++) {
+    if (xShotP1[i] > xP2 - 2 && xShotP1[i] < xP2 + 10 &&
+        yShotP1[i] > yP2 - 2 && yShotP1[i] < yP2 + 10) {
+      shotsP1 = 0; // Refill ammo
+      totalShots = 10;
+
+      // Randomize Player 2's new position
+      moveTarget();
+    }
+  }
+}
+
+// Draw background
+void drawBackground() {
+  display.drawRect(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT, WHITE);
+}
+
+// Plot players
+void plotPlayers() {
+  display.fillRect(xP1 - 2, yP1 - 2, 6, 6, WHITE); // Player 1
+  display.fillRect(xP2 - 2, yP2 - 2, 6, 6, WHITE); // Target (Player 2)
+}
+
+// Plot bullets
+void plotShots() {
+  for (int i = 0; i < shotsP1; i++) {
+    float weight = (scale.read() - tareValue) / calibrationFactor; // Adjust raw reading
+    int bulletSize = constrain(weight / weightScalingFactor, 1, maxBulletSize);
+    display.fillRect(xShotP1[i], yShotP1[i], bulletSize, bulletSize, WHITE);
+  }
+}
+
+// Display score
+void displayScore() {
+  display.setCursor(0, 0);
+  display.print("Ammo: ");
+  display.print(totalShots - shotsP1);
+}
+
+// Log physics data
+void logPhysicsData() {
+  float weight = (scale.read() - tareValue) / calibrationFactor;
+  long distance = measureDistance();
+  Serial.print("Weight (kg): ");
+  Serial.print(weight, 2);
+  Serial.print(", Distance (cm): ");
+  Serial.println(distance);
+}
+
+// Game Over screen
+void gameOver() {
+  display.clearDisplay();
+  display.setCursor(10, SCREEN_HEIGHT / 2 - 10);
+  display.setTextSize(2);
+  display.println("GAME OVER!");
+  display.display();
+
+  cheatCodeIndex = 0;
+
+  while (true) {
+    int joystickX = analogRead(JOYSTICK_X);
+    int joystickY = analogRead(JOYSTICK_Y);
+
+    // Up, Down, Left, Right (mapped to cheat code steps)
+    int direction = -1;
+    if (joystickY < 300) direction = 0;     // Up
+    else if (joystickY > 700) direction = 1; // Down
+    else if (joystickX < 300) direction = 2; // Left
+    else if (joystickX > 700) direction = 3; // Right
+
+    if (direction == cheatCode[cheatCodeIndex]) {
+      cheatCodeIndex++;
+      if (cheatCodeIndex == 8) {
+        gamePlay();
+        return;
+      }
+    } else if (direction != -1) {
+      cheatCodeIndex = 0; // Reset on wrong input
+    }
+
+    delay(200); // Avoid multiple inputs
+  }
+}
+
+// Main game logic
+void gamePlay() {
+  long currentTime = millis();
+
+  do {
+    display.clearDisplay();
+
+    drawBackground();
+    displayScore();
+
+    // Read thumbstick values
+    int joystickX = analogRead(JOYSTICK_X) - 512; // Centered at 0
+    int joystickY = analogRead(JOYSTICK_Y) - 512; // Centered at 0
+
+    // Map thumbstick values to movement
+    if (joystickY < -100 && yP1 > 21) { // Up
+      yP1 -= 5;
+    } else if (joystickY > 100 && yP1 < 58) { // Down
+      yP1 += 5;
+    }
+
+    if (joystickX < -100 && xP1 >= 11) { // Left
+      xP1 -= 5;
+    } else if (joystickX > 100 && xP1 <= 116) { // Right
+      xP1 += 5;
+    }
+
+    // Check ultrasonic sensor for shooting
+    long distance = measureDistance();
+    if (distance > 0 && distance < shootDistance && millis() > shotTimeP1 + 300) {
+      if (shotsP1 < totalShots) {
+        shotTimeP1 = millis();
+        yShotP1[shotsP1] = yP1;   // Set coordinates of new shot
+        xShotP1[shotsP1] = xP1 + 5;
+        shotsP1++;
+      }
+    }
+
+    checkHitP2(shotsP1);
+    currentTime = millis();
+
+    if (currentTime > (timer + refreshRate)) { // Advance shots
+      timer = millis();
+      for (int p1a = 0; p1a < shotsP1; p1a++) { // P1 shots go forwards
+        xShotP1[p1a] += 5;
+      }
+    }
+
+    plotPlayers();
+    plotShots();
+    logPhysicsData();
+    display.display();
+
+  } while (shotsP1 < totalShots);
+
+  gameOver(); // Display Game Over screen
+}
+
+// Main program
+void setup() {
+  display.begin(SSD1306_SWITCHCAPVCC, SCREEN_ADDRESS);
+  display.setTextColor(WHITE);
+  display.clearDisplay();
+  display.display();
+  randomSeed(analogRead(0)); // Seed random generator
+
+  pinMode(TRIGGER_PIN, OUTPUT);
+  pinMode(ECHO_PIN, INPUT);
+
+  Serial.begin(9600); // Initialize Serial communication
+
+  // Manually zero the scale
+  for (int i = 0; i < 10; i++) { // Average 10 readings for tare
+    tareValue += scale.read();
+  }
+  tareValue /= 10; // Average tare value
+
+  Serial.println("System Initialized. Ready to read data...");
+}
+
+void loop() {
+  gamePlay();
+}
+
+
+
